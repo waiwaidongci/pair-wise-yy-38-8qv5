@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .audit import make_entry, utc_now
 from .domain import ConflictError, NotFoundError
-from .rules import ID_PREFIX, STATES
+from .rules import ID_PREFIX, STATES, TICKET_STATES
 
 
 class Repository:
@@ -64,6 +64,26 @@ class Repository:
                     previous_hash TEXT NOT NULL,
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    gate_seq INTEGER NOT NULL,
+                    planned_opening REAL NOT NULL,
+                    executor TEXT NOT NULL,
+                    reviewer TEXT NOT NULL,
+                    level_min REAL NOT NULL,
+                    flow_max REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'registered'
+                        CHECK(status IN ('registered','confirmed','redo')),
+                    actual_level REAL,
+                    actual_flow REAL,
+                    confirmed_by TEXT,
+                    confirmed_at TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(item_id, gate_seq)
                 );
             """)
 
@@ -153,6 +173,74 @@ class Repository:
         with self._lock:
             row = self.conn.execute(
                 "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND status='open'",
+                (item_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def create_ticket(self, item_id: int, gate_seq: int, planned_opening: float,
+                      executor: str, reviewer: str, level_min: float, flow_max: float,
+                      actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        try:
+            with self._lock, self.conn:
+                cur = self.conn.execute(
+                    """INSERT INTO tickets(item_id, gate_seq, planned_opening, executor,
+                       reviewer, level_min, flow_max, status, created_by, created_at,
+                       updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, gate_seq, planned_opening, executor, reviewer, level_min,
+                     flow_max, TICKET_STATES[0], actor, now, now),
+                )
+                ticket_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("闸门顺序已存在") from exc
+        return self.get_ticket(ticket_id)
+
+    def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("票据不存在")
+        return dict(row)
+
+    def get_item_ticket(self, item_id: int, ticket_id: int) -> Dict[str, Any]:
+        ticket = self.get_ticket(ticket_id)
+        if ticket["item_id"] != item_id:
+            raise NotFoundError("票据不存在")
+        return ticket
+
+    def list_tickets(self, item_id: int) -> List[Dict[str, Any]]:
+        self.get_item(item_id)
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM tickets WHERE item_id=? ORDER BY gate_seq", (item_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_ticket_redo(self, ticket_id: int) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE tickets SET status='redo', updated_at=? WHERE id=?",
+                (now, ticket_id),
+            )
+        return self.get_ticket(ticket_id)
+
+    def confirm_ticket(self, ticket_id: int, actual_level: float, actual_flow: float,
+                       actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            self.conn.execute(
+                """UPDATE tickets SET status='confirmed', actual_level=?, actual_flow=?,
+                   confirmed_by=?, confirmed_at=?, updated_at=? WHERE id=?""",
+                (actual_level, actual_flow, actor, now, now, ticket_id),
+            )
+        return self.get_ticket(ticket_id)
+
+    def pending_ticket_count(self, item_id: int) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM tickets WHERE item_id=? AND status<>'confirmed'",
                 (item_id,),
             ).fetchone()
         return int(row["n"])

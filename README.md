@@ -30,9 +30,20 @@ python3 app.py --db ./data.db --port 8315
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `GET /api/items/{id}/tickets`
+- `POST /api/items/{id}/tickets`
+- `POST /api/items/{id}/tickets/{tid}/confirm`
 - `GET /api/audit`
 
 允许角色：duty_officer, chief_engineer, dispatcher, viewer。库位超过汛限或入库流量上升时提升紧迫度；授权前必须有复核记录，执行后仍要闭环现场反馈。
+
+## 闸门操作票据
+
+汛期开闸除总工授权外，还须按闸门逐项签认：
+
+- 调度员（dispatcher）登记票据：闸门顺序`gate_seq`（同一指令内唯一）、计划开度、执行人、复核人、库位下限`level_min`和过流上限`flow_max`；同一账号不能同时担任执行与复核。
+- 指令进入`executed`后，由登记复核人带入现场库位`actual_level`和实际过流`actual_flow`确认；读数越界（库位低于下限或过流超过上限）或复核人已换班（确认人与登记复核人不一致）时，票据转`redo`待重做并保留原计划值，可重新签认。
+- 全部票据确认后指令才能归档`closed`；登记、签认、重做均写入审计链。
 
 ## 测试
 

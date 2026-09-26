@@ -20,3 +20,15 @@ def validate_transition(current,target):
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
+TICKET_STATES=['registered','confirmed','redo']; TICKET_CREATE_ROLES=set(['dispatcher']); TICKET_CONFIRM_ROLES=set(['dispatcher','duty_officer']); CONFIRM_STAGE='executed'
+def validate_ticket_plan(executor,reviewer):
+    if executor==reviewer: raise ValidationError("执行人与复核人不能是同一账号")
+def ensure_ticket_registration(status):
+    if status in TERMINAL_STATES: raise ConflictError("指令已归档，不能登记票据")
+def ensure_confirmation_stage(status):
+    if status!=CONFIRM_STAGE: raise ConflictError("指令未执行，不能签认票据")
+def evaluate_confirmation(reviewer,actor,actual_level,actual_flow,level_min,flow_max):
+    if actor!=reviewer: return 'redo','reviewer_changed'
+    if actual_level<level_min or actual_flow>flow_max: return 'redo','reading_out_of_bounds'
+    return 'confirmed',None
+def ticket_blockers(target,pending_tickets): return ["仍有未确认闸门票据"] if target in TERMINAL_STATES and pending_tickets>0 else []

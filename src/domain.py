@@ -18,6 +18,9 @@ class Item:
 class Record:
     id:int; item_id:int; kind:str; detail:str; status:str; external_ref:Optional[str]; created_by:str; created_at:str
 @dataclass(frozen=True)
+class Ticket:
+    id:int; item_id:int; gate_seq:int; planned_opening:float; executor:str; reviewer:str; level_min:float; flow_max:float; status:str; actual_level:Optional[float]; actual_flow:Optional[float]; confirmed_by:Optional[str]; confirmed_at:Optional[str]; created_by:str; created_at:str; updated_at:str
+@dataclass(frozen=True)
 class AuditEntry:
     id:int; action:str; entity_type:str; entity_id:int; actor:str; detail:Dict[str,Any]; previous_hash:str; entry_hash:str; created_at:str
 def require_text(value,field,max_length=2000):
