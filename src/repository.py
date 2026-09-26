@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .audit import make_entry, utc_now
 from .domain import ConflictError, NotFoundError
-from .rules import ID_PREFIX, STATES
+from .rules import ID_PREFIX, STATES, TICKET_STATES
 
 
 class Repository:
@@ -24,6 +24,7 @@ class Repository:
 
     def _create_schema(self) -> None:
         statuses = ",".join("'" + s.replace("'", "''") + "'" for s in STATES)
+        ticket_statuses = ",".join("'" + s.replace("'", "''") + "'" for s in TICKET_STATES)
         with self.conn:
             self.conn.executescript(f"""
                 CREATE TABLE IF NOT EXISTS items (
@@ -53,6 +54,26 @@ class Repository:
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE(item_id, external_ref)
+                );
+                CREATE TABLE IF NOT EXISTS gate_tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    planned_opening REAL NOT NULL,
+                    executor TEXT NOT NULL,
+                    reviewer TEXT NOT NULL,
+                    level_lower REAL NOT NULL,
+                    flow_upper REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'registered'
+                        CHECK(status IN ({ticket_statuses})),
+                    field_level REAL,
+                    actual_flow REAL,
+                    confirmed_by TEXT,
+                    confirmed_at TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(item_id, sequence)
                 );
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,6 +175,97 @@ class Repository:
             row = self.conn.execute(
                 "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND status='open'",
                 (item_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def create_ticket(self, item_id: int, sequence: int, planned_opening: float,
+                      executor: str, reviewer: str, level_lower: float,
+                      flow_upper: float, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        try:
+            with self._lock, self.conn:
+                cur = self.conn.execute(
+                    """INSERT INTO gate_tickets(item_id, sequence, planned_opening, executor,
+                       reviewer, level_lower, flow_upper, status, created_by, created_at,
+                       updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, sequence, planned_opening, executor, reviewer, level_lower,
+                     flow_upper, TICKET_STATES[0], actor, now, now),
+                )
+                ticket_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("闸门顺序已存在") from exc
+        return self.get_ticket(ticket_id)
+
+    def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM gate_tickets WHERE id=?", (ticket_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("操作票据不存在")
+        return dict(row)
+
+    def get_item_ticket(self, item_id: int, ticket_id: int) -> Dict[str, Any]:
+        ticket = self.get_ticket(ticket_id)
+        if ticket["item_id"] != item_id:
+            raise NotFoundError("操作票据不存在")
+        return ticket
+
+    def list_tickets(self, item_id: int) -> List[Dict[str, Any]]:
+        self.get_item(item_id)
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM gate_tickets WHERE item_id=? ORDER BY sequence, id",
+                (item_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revise_ticket(self, ticket_id: int, sequence: int, planned_opening: float,
+                      executor: str, reviewer: str, level_lower: float,
+                      flow_upper: float, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self._lock, self.conn:
+                cur = self.conn.execute(
+                    """UPDATE gate_tickets SET sequence=?, planned_opening=?, executor=?,
+                       reviewer=?, level_lower=?, flow_upper=?, status=?, updated_at=?
+                       WHERE id=? AND status!=?""",
+                    (sequence, planned_opening, executor, reviewer, level_lower,
+                     flow_upper, TICKET_STATES[0], now, ticket_id, TICKET_STATES[1]),
+                )
+                if cur.rowcount == 0:
+                    exists = self.conn.execute(
+                        "SELECT 1 FROM gate_tickets WHERE id=?", (ticket_id,)).fetchone()
+                    if exists is None:
+                        raise NotFoundError("操作票据不存在")
+                    raise ConflictError("票据已确认，不能修改")
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("闸门顺序已存在") from exc
+        return self.get_ticket(ticket_id)
+
+    def record_confirmation(self, ticket_id: int, field_level: float, actual_flow: float,
+                            actor: str, status: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE gate_tickets SET field_level=?, actual_flow=?, confirmed_by=?,
+                   confirmed_at=?, status=?, updated_at=? WHERE id=? AND status!=?""",
+                (field_level, actual_flow, actor, now, status, now, ticket_id,
+                 TICKET_STATES[1]),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM gate_tickets WHERE id=?", (ticket_id,)).fetchone()
+                if exists is None:
+                    raise NotFoundError("操作票据不存在")
+                raise ConflictError("票据已确认")
+        return self.get_ticket(ticket_id)
+
+    def unconfirmed_ticket_count(self, item_id: int) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM gate_tickets WHERE item_id=? AND status!=?",
+                (item_id, TICKET_STATES[1]),
             ).fetchone()
         return int(row["n"])
 

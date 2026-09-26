@@ -30,9 +30,21 @@ python3 app.py --db ./data.db --port 8315
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `GET /api/items/{id}/tickets`
+- `POST /api/items/{id}/tickets`，调度员在指令授权后登记闸门操作票据
+- `POST /api/items/{id}/tickets/{tid}/confirm`，指令执行后由复核人确认
+- `POST /api/items/{id}/tickets/{tid}/revise`，调度员修订未确认票据（如复核人换班）
 - `GET /api/audit`
 
 允许角色：duty_officer, chief_engineer, dispatcher, viewer。库位超过汛限或入库流量上升时提升紧迫度；授权前必须有复核记录，执行后仍要闭环现场反馈。
+
+## 闸门操作票据
+
+汛期开闸在总工授权之外按闸门逐项签认：
+
+- 调度员登记闸门顺序、计划开度、执行人、复核人、库位下限和过流上限；同一账号不能同时担任执行与复核，同一指令内闸门顺序不能重复。
+- 指令执行后，复核人带入现场库位和实际过流逐票确认；读数越界（库位低于下限或过流超过上限）或复核人已换班（确认账号与登记复核人不一致）时，票据转`pending_redo`并保留原读数，可由调度员修订后重新确认。
+- 全部票据确认后指令才能归档；票据的登记、修订、确认均写入原有SHA-256审计链。
 
 ## 测试
 
